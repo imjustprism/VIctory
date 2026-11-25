@@ -1845,3 +1845,87 @@ impl Host {
         }
     }
 }
+
+/// Probe, never merged: prints what DXGI reports for each adapter of the
+/// machine the tests run on, then fails so the output shows in the log.
+#[cfg(test)]
+#[test]
+fn probe_adapters() {
+    let mut lines = Vec::new();
+    let describe = |adapter: &IDXGIAdapter1| -> String {
+        // SAFETY: a plain DXGI query on a live adapter.
+        match unsafe { adapter.GetDesc1() } {
+            Ok(d) => format!(
+                "{:?} vendor {:#x} device {:#x} subsys {:#x} rev {:#x} flags {:#x} vram {} sysmem {} shared {} luid {:x}:{:x}",
+                String::from_utf16_lossy(&d.Description).trim_end_matches('\0'),
+                d.VendorId,
+                d.DeviceId,
+                d.SubSysId,
+                d.Revision,
+                d.Flags,
+                d.DedicatedVideoMemory,
+                d.DedicatedSystemMemory,
+                d.SharedSystemMemory,
+                d.AdapterLuid.HighPart,
+                d.AdapterLuid.LowPart
+            ),
+            Err(e) => format!("no description: {}", err(e)),
+        }
+    };
+    let device_facts = |device: &ID3D12Device| -> String {
+        let mut options = D3D12_FEATURE_DATA_D3D12_OPTIONS1::default();
+        // SAFETY: plain D3D12 queries writing a struct of the size given.
+        unsafe {
+            let luid = device.GetAdapterLuid();
+            let checked = device.CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS1,
+                (&raw mut options).cast(),
+                size_of_val(&options) as u32,
+            );
+            format!(
+                "device luid {:x}:{:x} options1 {:?} waveops {} lanes {}..{} total {}",
+                luid.HighPart,
+                luid.LowPart,
+                checked.map_err(err),
+                options.WaveOps.0,
+                options.WaveLaneCountMin,
+                options.WaveLaneCountMax,
+                options.TotalLaneCount
+            )
+        }
+    };
+    // SAFETY: plain D3D12/DXGI calls with valid out pointers.
+    unsafe {
+        let factory: IDXGIFactory4 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).unwrap();
+        let mut index = 0;
+        while let Ok(adapter) = factory.EnumAdapters1(index) {
+            lines.push(format!("adapter {index}: {}", describe(&adapter)));
+            let mut device: Option<ID3D12Device> = None;
+            let created = D3D12CreateDevice(&adapter, D3D_FEATURE_LEVEL_12_0, &mut device);
+            lines.push(format!("  d3d12 12_0: {:?}", created.map_err(err)));
+            if let Some(device) = &device {
+                lines.push(format!("  {}", device_facts(device)));
+            }
+            index += 1;
+        }
+        match factory.EnumWarpAdapter::<IDXGIAdapter1>() {
+            Ok(adapter) => lines.push(format!("warp adapter: {}", describe(&adapter))),
+            Err(e) => lines.push(format!("warp adapter: {}", err(e))),
+        }
+        let mut device: Option<ID3D12Device> = None;
+        let created = D3D12CreateDevice(None, D3D_FEATURE_LEVEL_12_0, &mut device);
+        lines.push(format!("default device: {:?}", created.map_err(err)));
+        if let Some(device) = &device {
+            lines.push(format!("  {}", device_facts(device)));
+        }
+    }
+    lines.push(format!(
+        "Host::new(false): {:?}",
+        Host::new(false).map(|_| "created")
+    ));
+    lines.push(format!(
+        "Host::new(true): {:?}",
+        Host::new(true).map(|_| "created")
+    ));
+    panic!("\n{}", lines.join("\n"));
+}
