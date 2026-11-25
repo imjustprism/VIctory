@@ -62,6 +62,23 @@ fn err(e: windows::core::Error) -> String {
     e.message().to_string()
 }
 
+/// Microsoft's PCI vendor, which the Basic Render Driver (WARP) shares with
+/// Microsoft's other adapters; from Microsoft's DXGI overview, "enumerating
+/// adapters".
+const BASIC_RENDER_VENDOR: u32 = 0x1414;
+/// The Basic Render Driver's PCI device, from the same place.
+const BASIC_RENDER_DEVICE: u32 = 0x8c;
+
+/// Whether the adapter renders in software. Where no display driver works,
+/// the primary adapter is the Basic Render Driver too, with outputs and
+/// without `DXGI_ADAPTER_FLAG_SOFTWARE` (the same overview; adapter 0 of
+/// GitHub's Windows runner), so the flag alone misses the default adapter
+/// there.
+fn is_software(desc: &DXGI_ADAPTER_DESC1) -> bool {
+    desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0
+        || (desc.VendorId, desc.DeviceId) == (BASIC_RENDER_VENDOR, BASIC_RENDER_DEVICE)
+}
+
 impl Host {
     /// The default adapter, or WARP with `warp` (or `VICTORY_WARP=1`).
     /// A software default adapter (a machine without a GPU, as CI) is
@@ -77,8 +94,7 @@ impl Host {
                 factory.EnumWarpAdapter().map_err(err)?
             } else {
                 let adapter = factory.EnumAdapters1(0).map_err(err)?;
-                if adapter.GetDesc1().map_err(err)?.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0
-                {
+                if is_software(&adapter.GetDesc1().map_err(err)?) {
                     return Err("no hardware adapter".into());
                 }
                 adapter
@@ -1843,5 +1859,48 @@ impl Host {
             drop(keep);
             Ok(out)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_basic_render_driver_is_software_without_the_flag() {
+        // What GitHub's Windows runner reports for adapter 0.
+        assert!(is_software(&DXGI_ADAPTER_DESC1 {
+            VendorId: 0x1414,
+            DeviceId: 0x8c,
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn an_adapter_with_the_software_flag_is_software() {
+        assert!(is_software(&DXGI_ADAPTER_DESC1 {
+            VendorId: 0x1002,
+            DeviceId: 1,
+            Flags: DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32,
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn a_gpu_is_not_software() {
+        assert!(!is_software(&DXGI_ADAPTER_DESC1 {
+            VendorId: 0x1002,
+            DeviceId: 1,
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn a_microsoft_adapter_other_than_the_basic_render_driver_is_not_software() {
+        assert!(!is_software(&DXGI_ADAPTER_DESC1 {
+            VendorId: 0x1414,
+            DeviceId: 1,
+            ..Default::default()
+        }));
     }
 }
